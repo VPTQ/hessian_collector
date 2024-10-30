@@ -6,6 +6,7 @@ import datetime
 import os
 import random
 
+import gc
 import numpy
 import torch
 import torch.multiprocessing as mp
@@ -88,6 +89,7 @@ def sym_to_flat(A):
 def forward_layer(layer, position_ids, attention_mask, bs, device, in_q, out_q):
     torch.set_grad_enabled(False)
     layer = layer.to(device)
+    layer.cpu_layer = None
     position_ids = position_ids.to(device)
     attention_mask = attention_mask.to(device)
     done_qkv = register_H_hook(layer.self_attn.q_proj, device)
@@ -157,6 +159,11 @@ def accumulate(in_q, move_q, ngpus, args, transformer_layer_index):
     del Hs, mus, cts, out
 
 
+def clean():
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
 def main(args):
     print("loading model...")
     model = AutoModelForCausalLM.from_pretrained(
@@ -164,6 +171,7 @@ def main(args):
         torch_dtype="auto",
         low_cpu_mem_usage=True,
         trust_remote_code=True,
+        device_map='auto'
     )
     print("loaded model!")
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
@@ -219,6 +227,10 @@ def main(args):
             continue
 
         transformer_layer = model.model.layers[transformer_layer_index]
+        if transformer_layer_index > 0:
+            del model.model.layers[transformer_layer_index - 1]
+            torch.cuda.empty_cache()
+
         # check that there are four layers, as expected
         assert (len([m for m in transformer_layer.modules()
                 if isinstance(m, torch.nn.Linear)]) == 7)
@@ -262,7 +274,7 @@ def main(args):
 
         transformer_layer.cpu()
         model.model.layers[transformer_layer_index] = None
-        utils.clean()
+        clean()
 
         if args.save_activations and (
             transformer_layer_index % args.act_save_rate == 0 or transformer_layer_index == len(
