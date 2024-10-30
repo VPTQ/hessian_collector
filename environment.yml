@@ -1,0 +1,19 @@
+name: hessian
+channels:
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - ninja
+  - pytorch>=2.4.0
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.1
+  - pip
+  - pip:
+    - accelerate
+    - flash_attn==2.5.8
+    - transformers>=4.45
+    - datasets
+    - tensorboard
