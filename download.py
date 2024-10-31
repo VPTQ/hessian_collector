@@ -10,5 +10,3 @@ args = parser.parse_args()
 from huggingface_hub import snapshot_download
 
 snapshot_download(args.model, max_workers=args.threads)
-
-
