@@ -3,16 +3,17 @@
 # from lib import utils
 import argparse
 import datetime
+import gc
 import os
 import random
 
-import gc
 import numpy
+import psutil
 import torch
+import torch.cuda.streams
 import torch.multiprocessing as mp
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.modeling_attn_mask_utils import (
-    _prepare_4d_causal_attention_mask)
+from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
 from dataset import sample_rp1t
 
@@ -23,8 +24,7 @@ parser.add_argument('--seed', default=0, type=int)
 parser.add_argument('--batch_size', default=2, type=int)
 parser.add_argument('--devset_size', default=256, type=int)
 parser.add_argument('--ctx_size', default=4096, type=int)
-parser.add_argument(
-    '--base_model', default='meta-llama/Llama-2-70b-hf', type=str)
+parser.add_argument('--base_model', default='meta-llama/Llama-2-70b-hf', type=str)
 parser.add_argument('--save_path', default='hessians/llama2_70b', type=str)
 parser.add_argument('--scratch_path', default=None, type=str)
 parser.add_argument('--chunk_size', default=256, type=int)
@@ -92,6 +92,8 @@ def forward_layer(layer, position_ids, attention_mask, bs, device, in_q, out_q):
     layer.cpu_layer = None
     position_ids = position_ids.to(device)
     attention_mask = attention_mask.to(device)
+
+    # register hooks
     done_qkv = register_H_hook(layer.self_attn.q_proj, device)
     done_o = register_H_hook(layer.self_attn.o_proj, device)
     done_up = register_H_hook(layer.mlp.up_proj, device)
@@ -103,19 +105,26 @@ def forward_layer(layer, position_ids, attention_mask, bs, device, in_q, out_q):
             layer = layer.cpu()
             position_ids = position_ids.cpu()
             attention_mask = attention_mask.cpu()
-            out_q.put({'qkv': done_qkv(), 'o': done_o(),
-                      'up': done_up(), 'down': done_down()})
+            out_q.put({'qkv': done_qkv(), 'o': done_o(), 'up': done_up(), 'down': done_down()})
             return
 
         assert len(dev_emb) % bs == 0
         for i in range(len(dev_emb) // bs):
-            dev_emb[i * bs:(i + 1) * bs] = layer(
-                dev_emb[i * bs:(i + 1) * bs].to(device),
-                position_ids=position_ids,
-                attention_mask=attention_mask,
-                use_cache=False,
-                output_attentions=False
-            )[0].cpu()
+            batch = dev_emb[i * bs:(i + 1) * bs].to(device)
+            with torch.cuda.stream(torch.cuda.Stream()):
+                output = layer(
+                    batch,
+                    position_ids=position_ids,
+                    attention_mask=attention_mask,
+                    use_cache=False,
+                    output_attentions=False
+                )[0]
+                dev_emb[i:i + bs] = output.cpu()
+                del output
+
+            # clear cache every 4 batches
+            if i % (bs * 4) == 0:
+                torch.cuda.empty_cache()
 
 
 def accumulate(in_q, move_q, ngpus, args, transformer_layer_index):
@@ -127,10 +136,8 @@ def accumulate(in_q, move_q, ngpus, args, transformer_layer_index):
         out = in_q.get()
         if i == 0:
             for key in out:
-                Hs[key] = torch.zeros(
-                    out[key][0].shape, dtype=out[key][0].dtype)
-                mus[key] = torch.zeros(
-                    out[key][1].shape, dtype=out[key][1].dtype)
+                Hs[key] = torch.zeros(out[key][0].shape, dtype=out[key][0].dtype)
+                mus[key] = torch.zeros(out[key][1].shape, dtype=out[key][1].dtype)
                 cts[key] = 0
         for key in out:
             Hs[key].add_(out[key][0])
@@ -167,11 +174,7 @@ def clean():
 def main(args):
     print("loading model...")
     model = AutoModelForCausalLM.from_pretrained(
-        args.base_model,
-        torch_dtype="auto",
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-        device_map='auto'
+        args.base_model, torch_dtype="auto", low_cpu_mem_usage=True, trust_remote_code=True, device_map='auto'
     )
     print("loaded model!")
     tokenizer = AutoTokenizer.from_pretrained(args.base_model, use_fast=True)
@@ -179,16 +182,13 @@ def main(args):
 
     if os.path.isfile(f"{args.save_path}/dev_activations.pt"):
         print("loading cached dataset...")
-        loaded_dev_activations = torch.load(
-            f"{args.save_path}/dev_activations.pt")
+        loaded_dev_activations = torch.load(f"{args.save_path}/dev_activations.pt")
         after_layer = loaded_dev_activations['after_layer']
         dev_emb = loaded_dev_activations['dev_emb']
-        print(
-            f"loaded cached dataset from {loaded_dev_activations['timestamp']}")
+        print(f"loaded cached dataset from {loaded_dev_activations['timestamp']}")
     else:
         print("loading dataset...")
-        devset = sample_rp1t(
-            tokenizer, args.devset_size, args.ctx_size, nproc=args.sample_proc)
+        devset = sample_rp1t(tokenizer, args.devset_size, args.ctx_size, nproc=args.sample_proc)
         dev_emb = model.model.embed_tokens(devset)
         after_layer = -1
         print("loaded dataset!")
@@ -207,14 +207,12 @@ def main(args):
         )
     else:
         attention_mask = _prepare_4d_causal_attention_mask(
-            None, (args.batch_size,
-                   args.ctx_size), dev_emb[0:args.batch_size], 0
+            None, (args.batch_size, args.ctx_size), dev_emb[0:args.batch_size], 0
         )
 
     if args.scratch_path is not None:
         move_q = mp.Queue()
-        move_p = mp.Process(target=move_fn, args=(
-            move_q, args.async_copy_speed))
+        move_p = mp.Process(target=move_fn, args=(move_q, args.async_copy_speed))
         move_p.start()
     else:
         move_q = None
@@ -232,8 +230,7 @@ def main(args):
             torch.cuda.empty_cache()
 
         # check that there are four layers, as expected
-        assert (len([m for m in transformer_layer.modules()
-                if isinstance(m, torch.nn.Linear)]) == 7)
+        assert (len([m for m in transformer_layer.modules() if isinstance(m, torch.nn.Linear)]) == 7)
 
         chunk_size = min(args.chunk_size, len(dev_emb))
         ngpus = min(torch.cuda.device_count(), len(dev_emb) // chunk_size)
@@ -242,22 +239,19 @@ def main(args):
         in_q = manager.Queue()
         out_q = manager.Queue()
 
-        accumulate_proc = mp.Process(target=accumulate, args=(
-            out_q, move_q, ngpus, args, transformer_layer_index))
+        accumulate_proc = mp.Process(target=accumulate, args=(out_q, move_q, ngpus, args, transformer_layer_index))
         accumulate_proc.start()
 
         forward_procs = []
         for i in range(ngpus):
             p = mp.Process(
                 target=forward_layer,
-                args=(transformer_layer, position_ids,
-                      attention_mask, args.batch_size, i, in_q, out_q)
+                args=(transformer_layer, position_ids, attention_mask, args.batch_size, i, in_q, out_q)
             )
             p.start()
             forward_procs.append(p)
 
-        assert len(
-            dev_emb) % args.batch_size == 0 and chunk_size % args.batch_size == 0
+        assert len(dev_emb) % args.batch_size == 0 and chunk_size % args.batch_size == 0
         i = 0
         while i < len(dev_emb):
             next = min(i + chunk_size, len(dev_emb))
@@ -277,8 +271,7 @@ def main(args):
         clean()
 
         if args.save_activations and (
-            transformer_layer_index % args.act_save_rate == 0 or transformer_layer_index == len(
-                model.model.layers) - 1
+            transformer_layer_index % args.act_save_rate == 0 or transformer_layer_index == len(model.model.layers) - 1
         ):
             if args.scratch_path is not None:
                 if os.path.exists(f'{args.scratch_path}/dev_activations.pt'):
@@ -289,8 +282,7 @@ def main(args):
                         'after_layer': transformer_layer_index,
                         'timestamp': str(datetime.datetime.now())
                     }, f'{args.scratch_path}/dev_activations.pt')
-                    move_q.put((f'{args.scratch_path}/dev_activations.pt',
-                               f'{args.save_path}/dev_activations.pt'))
+                    move_q.put((f'{args.scratch_path}/dev_activations.pt', f'{args.save_path}/dev_activations.pt'))
             else:
                 torch.save({
                     'dev_emb': dev_emb,
