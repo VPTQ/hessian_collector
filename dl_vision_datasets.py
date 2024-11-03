@@ -17,6 +17,11 @@ import argparse
 import transformers
 import time
 
+import multiprocessing as mp
+from functools import partial
+import itertools
+
+
 def setup_directories(base_dir):
     # Create directories for text, images, and metadata
     dirs = ['texts', 'images', 'metadata']
@@ -68,44 +73,80 @@ def get_text(example):
     text = " ".join(txt for txt in example["texts"] if txt is not None)
     return text
 
+def process_sample(example_and_idx, output_dir, tokenizer, min_text_len):
+    """Process a single sample with image download"""
+    example, idx = example_and_idx  # Unpack the tuple here
+    text = get_text(example)
+    text_len = len(tokenizer.encode(text))
+    
+    if text_len > min_text_len:
+        print(f'Processing sample {idx}, text_len: {text_len}')
+        if download_image(example['images'], os.path.join(output_dir, 'images', f'{idx}'), retry=10, initial_delay=1):
+            # Save text and metadata
+            with open(os.path.join(output_dir, 'texts', f'{idx}.txt'), 'w') as f:
+                f.write(text)
+            with open(os.path.join(output_dir, 'metadata', f'{idx}.json'), 'w') as f:
+                json.dump(example, f)
+            return True
+    return False
+
 def main():
     # Configuration
     output_dir = "omnicorpus_samples"
-    num_samples = 2  # Number of samples to collect
     min_text_len = 4096
     
-    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-11B-Vision-Instruct")
-     
+    tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-11B-Vision-Instruct") 
     # Load dataset
     dataset = datasets.load_dataset("OpenGVLab/OmniCorpus-CC-210M", streaming=True)
     train_dataset = dataset['train']
-    
-    # print(f'dataset size: {len(train_dataset)}')
 
     # Process samples
     os.makedirs(os.path.join(output_dir, 'images'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'texts'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'metadata'), exist_ok=True)
 
+    num_processes = mp.cpu_count() - 1 
+    pool = mp.Pool(processes=num_processes)
+    
     successful_pairs = 0
-    with tqdm(total=num_samples) as pbar:
-        for i, example in enumerate(train_dataset):
-            if successful_pairs >= num_samples:
+    # 100 for each process
+    batch_size = 10
+    # 1M total samples
+    required_samples = 1000000
+    total_processed = 0
+    
+    try:
+        while True and total_processed < required_samples:  # Continue until we run out of data
+            # Collect a batch of samples
+            batch = list(itertools.islice(train_dataset, batch_size))
+            if not batch:  # If no more samples, break
                 break
-            text = get_text(example)
-            text_len = len(tokenizer.encode(text))
-            print(f'check {i}, text_len: {text_len}')
+           
+            batch_with_indices = [(example, i + total_processed) for i, example in enumerate(batch)]
             
-            if text_len > min_text_len:
-                print(f'successful pairs {successful_pairs}, find {i}, text_len: {text_len}')
-                # download_image(example['images_info'][0]['url'], os.path.join(output_dir, 'images', f'{i}.jpg'))
-                if download_image(example['images'], os.path.join(output_dir, 'images', f'{i}'), retry=10, initial_delay=1):
-                    with open(os.path.join(output_dir, 'texts', f'{i}.txt'), 'w') as f:
-                        f.write(text)
-                    with open(os.path.join(output_dir, 'metadata', f'{i}.json'), 'w') as f:
-                        json.dump(example, f)
-                    successful_pairs += 1
+            process_fn = partial(process_sample, 
+                               output_dir=output_dir,
+                               tokenizer=tokenizer,
+                               min_text_len=min_text_len)
             
+            results = list(pool.map(process_fn, batch_with_indices))            
+            
+            successful_pairs += sum(results)
+            total_processed += len(batch)
+            
+            print(f'Processed batch: {total_processed-len(batch)}-{total_processed}, '
+                  f'Successful pairs so far: {successful_pairs}')
+            
+    except KeyboardInterrupt:
+        print("\nInterrupted by user. Cleaning up...")
+    finally:
+        pool.close()
+        pool.join()
+        
+    print(f"Finished processing. Total samples processed: {total_processed}")
+    print(f"Total successful pairs: {successful_pairs}")
+
+
 if __name__ == "__main__":
     main()
      
