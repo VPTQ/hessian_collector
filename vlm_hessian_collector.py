@@ -27,13 +27,13 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', default=0, type=int)
-parser.add_argument('--base_model', default='meta-llama/Llama-3.2-11B-Vision-Instruct', type=str)
-parser.add_argument('--save_path', default='Hessians-Llama_32-11B-Vision-Instruct', type=str)
+parser.add_argument('--base_model', default='meta-llama/Llama-3.2-90B-Vision-Instruct', type=str)
+parser.add_argument('--save_path', default='Hessians-Llama_32-90B-Vision-Instruct', type=str)
 parser.add_argument('--sample_proc', default=4, type=int)
 parser.add_argument('--save_mem', default=False, type=bool)
 parser.add_argument('--image_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/images', type=str)
 parser.add_argument('--text_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/texts', type=str)
-parser.add_argument('--max_samples', default=8000, type=int)
+parser.add_argument('--max_samples', default=10, type=int)
 
 def move_fn(in_q, async_copy_speed):
     # async copy to avoid slow disk
@@ -211,9 +211,13 @@ def main(args):
     model = MllamaForConditionalGeneration.from_pretrained(
         args.base_model,
         low_cpu_mem_usage=True,
+        torch_dtype=torch.bfloat16,
+        use_flash_attention_2=False,
         device_map="auto",
-        _attn_implementation="sdpa"
+        # _attn_implementation="sdpa"
     )
+    model.tie_weights()
+    # device_map = dispatch_model(model, device_map="auto")
     # transformer_layers = distribute_layers_across_gpus(model, num_gpus)
     print("loaded model!")
     model = accelerator.prepare(model)
