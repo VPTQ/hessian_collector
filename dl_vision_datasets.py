@@ -92,7 +92,7 @@ def process_sample(example, output_dir, tokenizer, min_text_len, idx):
     
     if text_len > min_text_len:
         print(f'Processing sample {idx}, text_len: {text_len}')
-        if download_image(example['images'], os.path.join(output_dir, 'images', f'{idx}'), retry=10, initial_delay=1):
+        if download_image(example['images'], os.path.join(output_dir, 'images', f'{idx}'), retry=1, initial_delay=1):
             # Save text and metadata
             with open(os.path.join(output_dir, 'texts', f'{idx}.txt'), 'w') as f:
                 f.write(text)

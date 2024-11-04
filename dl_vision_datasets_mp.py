@@ -21,6 +21,13 @@ import multiprocessing as mp
 from functools import partial
 import itertools
 
+def clean_image_url(url):
+    """Remove size parameters from image URL"""
+    if url is None:
+        return None
+    # Split URL at '?' and take the base URL
+    base_url = url.split('?')[0]
+    return base_url
 
 def setup_directories(base_dir):
     # Create directories for text, images, and metadata
@@ -32,26 +39,29 @@ def setup_directories(base_dir):
         paths[dir_name] = dir_path
     return paths
 
-def download_image(images, save_path, retry=10, initial_delay=1):
+
+def download_image(images, save_path, retry=5, initial_delay=1):
     url = next((url for url in images if url is not None), images) if isinstance(images, list) else images
-    print(url) 
-    # if '.' in url.split('/')[-1]:
-    #     ext = os.path.splitext(url)[1].lower()
-    # else:
-    ext = '.jpg'
-        
+    url = clean_image_url(url)
+    print(url)
+    
     for attempt in range(retry):
         try:
             response = requests.get(url, timeout=10)
-            response.raise_for_status()  # Raises an HTTPError for bad responses
+            response.raise_for_status()
             
             if response.status_code == 200:
                 img = Image.open(io.BytesIO(response.content))
-                img.save(save_path + ext)
+                img_format = img.format.lower() if img.format else 'jpeg'
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+                
+                ext = f'.{img_format}'
+                img.save(save_path + ext, format=img_format)
                 return True
                 
         except requests.exceptions.RequestException as e:
-            delay = initial_delay * (2 ** attempt)  # Exponential backoff
+            delay = initial_delay
             print(f"Attempt {attempt + 1}/{retry} failed: {e}")
             print(f"Retrying in {delay} seconds...")
             time.sleep(delay)
@@ -59,8 +69,8 @@ def download_image(images, save_path, retry=10, initial_delay=1):
             
         except Exception as e:
             print(f"Unexpected error on attempt {attempt + 1}/{retry}: {e}")
-            if attempt < retry - 1:  # If not the last attempt
-                delay = initial_delay * (2 ** attempt)
+            if attempt < retry - 1:
+                delay = initial_delay
                 time.sleep(delay)
                 continue
             else:
@@ -68,20 +78,21 @@ def download_image(images, save_path, retry=10, initial_delay=1):
                 break
     return False
 
+
 def get_text(example):
     # Save text
     text = " ".join(txt for txt in example["texts"] if txt is not None)
     return text
 
-def process_sample(example_and_idx, output_dir, tokenizer, min_text_len):
+
+def process_sample(example, output_dir, tokenizer, min_text_len, idx):
     """Process a single sample with image download"""
-    example, idx = example_and_idx  # Unpack the tuple here
     text = get_text(example)
     text_len = len(tokenizer.encode(text))
     
     if text_len > min_text_len:
         print(f'Processing sample {idx}, text_len: {text_len}')
-        if download_image(example['images'], os.path.join(output_dir, 'images', f'{idx}'), retry=10, initial_delay=1):
+        if download_image(example['images'], os.path.join(output_dir, 'images', f'{idx}'), retry=1, initial_delay=1):
             # Save text and metadata
             with open(os.path.join(output_dir, 'texts', f'{idx}.txt'), 'w') as f:
                 f.write(text)
@@ -90,11 +101,17 @@ def process_sample(example_and_idx, output_dir, tokenizer, min_text_len):
             return True
     return False
 
+
 def main():
     # Configuration
     output_dir = "omnicorpus_samples"
-    min_text_len = 4096
     
+    parser = argparse.ArgumentParser(description='Download OmniCorpus dataset with range control')
+    parser.add_argument('--start', type=int, default=0, help='Starting index for download range')
+    parser.add_argument('--end', type=int, default=None, help='Ending index for download range (exclusive)')
+    parser.add_argument('--min_text_len', type=int, default=1024, help='Minimum text length to process')
+    args = parser.parse_args()
+     
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-11B-Vision-Instruct") 
     # Load dataset
     dataset = datasets.load_dataset("OpenGVLab/OmniCorpus-CC-210M", streaming=True)
@@ -105,47 +122,20 @@ def main():
     os.makedirs(os.path.join(output_dir, 'texts'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'metadata'), exist_ok=True)
 
-    num_processes = mp.cpu_count() - 1 
-    pool = mp.Pool(processes=num_processes)
-    
     successful_pairs = 0
-    # 100 for each process
-    batch_size = 10
-    # 1M total samples
-    required_samples = 1000000
     total_processed = 0
     
-    try:
-        while True and total_processed < required_samples:  # Continue until we run out of data
-            # Collect a batch of samples
-            batch = list(itertools.islice(train_dataset, batch_size))
-            if not batch:  # If no more samples, break
-                break
-           
-            batch_with_indices = [(example, i + total_processed) for i, example in enumerate(batch)]
-            
-            process_fn = partial(process_sample, 
-                               output_dir=output_dir,
-                               tokenizer=tokenizer,
-                               min_text_len=min_text_len)
-            
-            results = list(pool.map(process_fn, batch_with_indices))            
-            
-            successful_pairs += sum(results)
-            total_processed += len(batch)
-            
-            print(f'Processed batch: {total_processed-len(batch)}-{total_processed}, '
-                  f'Successful pairs so far: {successful_pairs}')
-            
-    except KeyboardInterrupt:
-        print("\nInterrupted by user. Cleaning up...")
-    finally:
-        pool.close()
-        pool.join()
-        
-    print(f"Finished processing. Total samples processed: {total_processed}")
-    print(f"Total successful pairs: {successful_pairs}")
-
+    idx = 0
+     
+    for example in train_dataset:
+        if idx >= args.start:
+            total_processed += 1
+            if process_sample(example, output_dir, tokenizer, args.min_text_len, idx):
+                successful_pairs += 1
+                print(f'Processed {total_processed} samples, {successful_pairs} successful pairs')
+        else:
+            idx += 1
+            continue
 
 if __name__ == "__main__":
     main()
