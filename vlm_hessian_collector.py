@@ -27,13 +27,13 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', default=0, type=int)
-parser.add_argument('--batch_size', default=2, type=int)
-parser.add_argument('--devset_size', default=256, type=int)
-parser.add_argument('--ctx_size', default=4096, type=int)
 parser.add_argument('--base_model', default='meta-llama/Llama-3.2-11B-Vision-Instruct', type=str)
 parser.add_argument('--save_path', default='Hessians-Llama_32-11B-Vision-Instruct', type=str)
 parser.add_argument('--sample_proc', default=4, type=int)
 parser.add_argument('--save_mem', default=False, type=bool)
+parser.add_argument('--image_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/images', type=str)
+parser.add_argument('--text_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/texts', type=str)
+parser.add_argument('--max_samples', default=8000, type=int)
 
 def move_fn(in_q, async_copy_speed):
     # async copy to avoid slow disk
@@ -226,36 +226,51 @@ def main(args):
             hook = register_H_hook(layer[1], device, args.save_mem)
             hooks.append((f"{layer[0]}", hook))
     
-    print(hooks)
+    print(f"hooks: {hooks}")
 
-    image = Image.open("/home/aiscuser/yangwang/omnicorpus_samples/images/15.jpeg")
-    # load text from file
-    with open("/home/aiscuser/yangwang/omnicorpus_samples/texts/15.txt", "r") as f:
-        text = f.read()
-        
-    messages = [
-        {"role": "user", "content": [
-            {"type": "image"},
-            # {"type": "text", "text": f"explain this image"}
-            {"type": "text", "text": f"{text}"}
-        ]}
-    ]
+    image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
+    # shuffle
+    random.shuffle(image_files)
+    image_files = image_files[:args.max_samples]
     
     processor = AutoProcessor.from_pretrained(args.base_model)
-    input_text = processor.apply_chat_template(messages, add_generation_prompt=True)
-    device = accelerator.device
-    inputs = processor(
-        image,
-        input_text,
-        add_special_tokens=False,
-        return_tensors="pt"
-    ).to(device)
+
+    for image_file in image_files:
+        # Get corresponding text file name (assuming same base name, different extension)
+        base_name = os.path.splitext(image_file)[0]
+        text_file = os.path.join(args.text_dir, f"{base_name}.txt")
+        
+        if not os.path.exists(text_file):
+            print(f"Warning: No matching text file for {image_file}, skipping...")
+            continue
+            
+        # Load image and text
+        image = Image.open(os.path.join(args.image_dir, image_file))
+        with open(text_file, "r") as f:
+            text = f.read()
+        
+        messages = [
+            {"role": "user", "content": [
+                {"type": "image"},
+                {"type": "text", "text": text}
+            ]}
+        ]
+        
+        input_text = processor.apply_chat_template(messages, add_generation_prompt=True)
+        device = accelerator.device
+        inputs = processor(
+            image,
+            input_text,
+            add_special_tokens=False,
+            return_tensors="pt"
+        ).to(device)
+        
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=30)
+            print(f"Processing {image_file}:")
+            # print(processor.decode(outputs[0]))
+            print("-" * 50)
     
-    with torch.no_grad():
-        outputs = model.generate(**inputs, max_new_tokens=30)
-        print(processor.decode(outputs[0]))
-
-
     # save hessians
     os.makedirs(args.save_path, exist_ok=True)
     for hook in hooks:
