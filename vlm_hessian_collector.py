@@ -285,10 +285,23 @@ def main(args):
             clean()
     
     # save hessians
+    clean() 
     os.makedirs(args.save_path, exist_ok=True)
     for hook in hooks:
         H, mu, ct = hook[1]()
         print(f'save hook: {hook[0]}, H: {H.shape}, mu: {mu.shape}, ct: {ct}')
+
+        mu = mu.to('cuda')
+        H = H.to('cuda')
+        
+        mu = mu.div_(ct)
+        H = H.div_(ct)
+        H = H.addmm_(-mu.unsqueeze(-1), mu.unsqueeze(0))
+        
+        mu = mu.to('cpu')
+        H = H.to('cpu')
+        ct = ct.to('cpu')
+       
         save_path = f"{args.save_path}/{hook[0]}.pt"
         torch.save({
             'flatH': sym_to_flat(H.to(torch.float32)),
@@ -296,7 +309,9 @@ def main(args):
             'n': H.shape[0],
             'ct': ct
         }, save_path)
-
+        
+        del H, mu
+        clean()
 
 if __name__ == "__main__":
     mp.set_start_method('spawn')
