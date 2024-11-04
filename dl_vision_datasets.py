@@ -105,7 +105,7 @@ def process_sample(example, output_dir, tokenizer, min_text_len, idx):
 def main():
     # Configuration
     output_dir = "omnicorpus_samples"
-    min_text_len = 4096
+    min_text_len = 1024 
     
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-11B-Vision-Instruct") 
     # Load dataset

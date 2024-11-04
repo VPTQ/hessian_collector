@@ -125,15 +125,13 @@ def main():
     successful_pairs = 0
     total_processed = 0
     
-    idx = 0
-     
-    for example in train_dataset:
-        if idx >= args.start:
-            total_processed += 1
-            if process_sample(example, output_dir, tokenizer, args.min_text_len, idx):
-                successful_pairs += 1
-                print(f'Processed {total_processed} samples, {successful_pairs} successful pairs')
-        idx += 1
+    dataset_iter = itertools.islice(train_dataset, args.start, args.end)
+ 
+    for example in dataset_iter:
+        total_processed += 1
+        if process_sample(example, output_dir, tokenizer, args.min_text_len, args.start + total_processed - 1):
+            successful_pairs += 1
+            print(f'Processed {total_processed} samples, {successful_pairs} successful pairs')
             
 if __name__ == "__main__":
     main()
