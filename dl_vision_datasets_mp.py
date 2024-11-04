@@ -133,10 +133,8 @@ def main():
             if process_sample(example, output_dir, tokenizer, args.min_text_len, idx):
                 successful_pairs += 1
                 print(f'Processed {total_processed} samples, {successful_pairs} successful pairs')
-        else:
-            idx += 1
-            continue
-
+        idx += 1
+            
 if __name__ == "__main__":
     main()
      
