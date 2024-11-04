@@ -33,7 +33,7 @@ parser.add_argument('--sample_proc', default=4, type=int)
 parser.add_argument('--save_mem', default=False, type=bool)
 parser.add_argument('--image_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/images', type=str)
 parser.add_argument('--text_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/texts', type=str)
-parser.add_argument('--max_samples', default=10, type=int)
+parser.add_argument('--max_samples', default=10000, type=int)
 
 def move_fn(in_q, async_copy_speed):
     # async copy to avoid slow disk
@@ -304,7 +304,6 @@ def main(args):
         
         mu = mu.to('cpu')
         H = H.to('cpu')
-        ct = ct.to('cpu')
        
         save_path = f"{args.save_path}/{hook[0]}.pt"
         torch.save({
