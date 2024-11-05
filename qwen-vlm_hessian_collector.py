@@ -217,12 +217,13 @@ def main(args):
     #     device_map="auto",
     #     # _attn_implementation="sdpa"
     # )
+
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         args.base_model, 
-        torch_dtype="auto", 
-        device_map="auto"
+        torch_dtype="auto",
+        use_flash_attention_2=False,
+        device_map="auto",
     )
-    
     model.tie_weights()
     # device_map = dispatch_model(model, device_map="auto")
     # transformer_layers = distribute_layers_across_gpus(model, num_gpus)
@@ -245,7 +246,12 @@ def main(args):
     random.shuffle(image_files)
     image_files = image_files[:args.max_samples]
     
-    processor = AutoProcessor.from_pretrained(args.base_model)
+    min_pixels = 256*28*28
+    max_pixels = 1280*28*28
+    
+    processor = AutoProcessor.from_pretrained(args.base_model,
+                                              min_pixels=min_pixels,
+                                              max_pixels=max_pixels,)
 
     idx = 0
     for image_file in image_files:
