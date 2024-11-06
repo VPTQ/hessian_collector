@@ -299,8 +299,8 @@ def main(args):
             # ).to(device)
             
             inputs = processor(
-               text=[input_text], images=[image], padding=True, return_tensors="pt"
-            )
+               text=[input_text], images=[image], padding=True, return_tensors="pt",
+            ).to(device)
              
         except Exception as e:
             print(f"Error processing {image_file}: {e}")
