@@ -300,7 +300,7 @@ def main(args):
         
         mu = mu.to('cpu')
         H = H.to('cpu')
-        ct = ct.to('cpu')
+        ct = ct
        
         save_path = f"{args.save_path}/{hook[0]}.pt"
         torch.save({
