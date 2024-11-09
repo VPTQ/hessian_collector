@@ -262,7 +262,7 @@ def main(args):
             ]}
         ]
         
-        input_text = processor.apply_chat_template(messages, add_generation_prompt=True)
+        input_text = processor.apply_chat_template(messages, add_generation_prompt=True, max_length=8192, truncation=True)
         device = accelerator.device
         
         try:
