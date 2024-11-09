@@ -78,6 +78,7 @@ def register_H_hook(module, device, save_mem):
         ct += len(x)
 
         del x
+        torch.cuda.empty_cache()
         # move back to cpu to save memory
         if save_mem:
             H = H.to('cpu')
@@ -210,23 +211,23 @@ def main(args):
     print("loading model...")
     model = MllamaForConditionalGeneration.from_pretrained(
         args.base_model,
-        low_cpu_mem_usage=True,
-        torch_dtype=torch.bfloat16,
+        torch_dtype="auto",
         use_flash_attention_2=False,
         device_map="auto",
-        # _attn_implementation="sdpa"
     )
     model.tie_weights()
     # device_map = dispatch_model(model, device_map="auto")
     # transformer_layers = distribute_layers_across_gpus(model, num_gpus)
     print("loaded model!")
+    model = model.eval()
     model = accelerator.prepare(model)
     
      
     hooks = []
     for layer_idx, layer in enumerate(model.named_modules()):
         print(f'layer_idx: {layer_idx}, layer: {layer}')
-        if isinstance(layer[1], torch.nn.Linear):
+        if isinstance(layer[1], torch.nn.Linear) and 'language_model.model' not in layer[0]:
+        # if isinstance(layer[1], torch.nn.Linear) and 'language_model.model' in layer[0]:
             device = next(layer[1].parameters()).device
             hook = register_H_hook(layer[1], device, args.save_mem)
             hooks.append((f"{layer[0]}", hook))
@@ -237,6 +238,7 @@ def main(args):
     # shuffle
     random.shuffle(image_files)
     image_files = image_files[:args.max_samples]
+    
     
     processor = AutoProcessor.from_pretrained(args.base_model)
 
@@ -262,7 +264,8 @@ def main(args):
             ]}
         ]
         
-        input_text = processor.apply_chat_template(messages, add_generation_prompt=True, max_length=8192, truncation=True)
+        input_text = processor.apply_chat_template(messages, add_generation_prompt=True,
+                                                   max_length=8192, truncation=True)
         device = accelerator.device
         
         try:
@@ -272,7 +275,7 @@ def main(args):
                 add_special_tokens=False,
                 return_tensors="pt"
             ).to(device)
-        
+
         except Exception as e:
             print(f"Error processing {image_file}: {e}")
             continue
@@ -284,7 +287,7 @@ def main(args):
             print("-" * 50)
             
         idx += 1
-        if idx % 10 == 0:
+        if idx % 1 == 0:
             print(f"Processed {idx} samples")
             clean()
     

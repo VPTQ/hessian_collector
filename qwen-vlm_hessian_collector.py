@@ -220,7 +220,7 @@ def main(args):
     # )
 
     model = Qwen2VLForConditionalGeneration.from_pretrained(
-        args.base_model, 
+        args.base_model,
         torch_dtype="auto",
         use_flash_attention_2=False,
         device_map="auto",
