@@ -225,7 +225,6 @@ def main(args):
     print("loaded model!")
     model = model.eval()
     model = accelerator.prepare(model)
-    
     hooks = []
     # HACK: split odd/even layers
     for layer_idx, layer in enumerate(model.named_modules()):
@@ -264,7 +263,7 @@ def main(args):
             print(f'store file list to {args.store_file_list}')
     
     processor = AutoProcessor.from_pretrained(args.base_model)
-
+    
     idx = 0
     for image_file in image_files:
         # Get corresponding text file name (assuming same base name, different extension)
@@ -280,23 +279,37 @@ def main(args):
         with open(text_file, "r") as f:
             text = f.read()
         
+        # truncate input text
+        def _truncate_and_decode(text, tokenizer, max_length):
+            # Encode the text with truncation
+            encoded = tokenizer.encode(text)    
+            encoded = encoded[:max_length]
+            # Decode the truncated text
+            truncated_text = tokenizer.decode(encoded, skip_special_tokens=True)
+            return truncated_text
+
+        text = _truncate_and_decode(text, processor.tokenizer, 16384) 
+        
         messages = [
             {"role": "user", "content": [
                 {"type": "image"},
                 {"type": "text", "text": text}
             ]}
         ]
-        
+         
         input_text = processor.apply_chat_template(messages, add_generation_prompt=True,
                                                    max_length=8192, truncation=True)
         device = accelerator.device
         
+        # print(f"input_text: {input_text}")
+        # print(f'len input_text: {len(input_text)}')
+         
         try:
             inputs = processor(
                 image,
                 input_text,
                 add_special_tokens=False,
-                return_tensors="pt"
+                return_tensors="pt",
             ).to(device)
 
         except Exception as e:
