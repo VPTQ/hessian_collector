@@ -23,7 +23,7 @@ from accelerate import dispatch_model
 
 import pickle
 
-# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', default=0, type=int)
