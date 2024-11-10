@@ -21,9 +21,9 @@ from transformers import MllamaForConditionalGeneration, AutoProcessor
 from accelerate import Accelerator
 from accelerate import dispatch_model
 
-from dataset import sample_rp1t
+import pickle
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+# os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', default=0, type=int)
@@ -34,6 +34,10 @@ parser.add_argument('--save_mem', default=False, type=bool)
 parser.add_argument('--image_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/images', type=str)
 parser.add_argument('--text_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/texts', type=str)
 parser.add_argument('--max_samples', default=10000, type=int)
+parser.add_argument('--load_file_list', default=None, type=str)
+parser.add_argument('--store_file_list', default=None, type=str)
+parser.add_argument('--num_part', default=1, type=int)
+parser.add_argument('--part_id', default=0, type=int)
 
 def move_fn(in_q, async_copy_speed):
     # async copy to avoid slow disk
@@ -222,23 +226,42 @@ def main(args):
     model = model.eval()
     model = accelerator.prepare(model)
     
-     
     hooks = []
+    # HACK: split odd/even layers
     for layer_idx, layer in enumerate(model.named_modules()):
         print(f'layer_idx: {layer_idx}, layer: {layer}')
-        if isinstance(layer[1], torch.nn.Linear) and 'language_model.model' not in layer[0]:
+        # language_model.model.layers.0.mlp.down_proj.pt
+        parts = layer[0].split('.')
+        print(parts)
+        try:
+            # Try to parse the layer index from parts that typically contain numbers
+            model_layer_idx = int(parts[3])
+        except (IndexError, ValueError):
+            model_layer_idx = 0
+            continue
+        
+        if isinstance(layer[1], torch.nn.Linear) and model_layer_idx % args.num_part == args.part_id:
         # if isinstance(layer[1], torch.nn.Linear) and 'language_model.model' in layer[0]:
             device = next(layer[1].parameters()).device
             hook = register_H_hook(layer[1], device, args.save_mem)
             hooks.append((f"{layer[0]}", hook))
     
     print(f"hooks: {hooks}")
-
-    image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
-    # shuffle
-    random.shuffle(image_files)
-    image_files = image_files[:args.max_samples]
     
+    if args.load_file_list is not None:
+        with open(args.load_file_list, 'rb') as f:
+            image_files = pickle.load(f)
+        print(f'load file list to {args.load_file_list}')
+    else: 
+        image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
+        # shuffle
+        random.shuffle(image_files)
+        image_files = image_files[:args.max_samples]
+    
+        if args.store_file_list is not None:
+            with open(args.store_file_list, 'wb') as f:
+                pickle.dump(image_files, f)
+            print(f'store file list to {args.store_file_list}')
     
     processor = AutoProcessor.from_pretrained(args.base_model)
 
