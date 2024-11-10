@@ -288,7 +288,7 @@ def main(args):
             truncated_text = tokenizer.decode(encoded, skip_special_tokens=True)
             return truncated_text
 
-        text = _truncate_and_decode(text, processor.tokenizer, 16384) 
+        text = _truncate_and_decode(text, processor.tokenizer, 8192) 
         
         messages = [
             {"role": "user", "content": [
