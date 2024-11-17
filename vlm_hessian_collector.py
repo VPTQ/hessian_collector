@@ -38,6 +38,7 @@ parser.add_argument('--load_file_list', default=None, type=str)
 parser.add_argument('--store_file_list', default=None, type=str)
 parser.add_argument('--num_part', default=1, type=int)
 parser.add_argument('--part_id', default=0, type=int)
+parser.add_argument('--start_idx', default=0, type=int)
 
 def move_fn(in_q, async_copy_speed):
     # async copy to avoid slow disk
@@ -255,6 +256,7 @@ def main(args):
         image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
         # shuffle
         random.shuffle(image_files)
+        image_files = image_files[args.start_idx:]
         image_files = image_files[:args.max_samples]
     
         if args.store_file_list is not None:
