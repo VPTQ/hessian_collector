@@ -256,14 +256,15 @@ def main(args):
         image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
         # shuffle
         random.shuffle(image_files)
-        image_files = image_files[args.start_idx:]
-        image_files = image_files[:args.max_samples]
-    
         if args.store_file_list is not None:
             with open(args.store_file_list, 'wb') as f:
                 pickle.dump(image_files, f)
             print(f'store file list to {args.store_file_list}')
+
+    image_files = image_files[args.start_idx:]
+    image_files = image_files[:args.max_samples]
     
+   
     processor = AutoProcessor.from_pretrained(args.base_model)
     
     idx = 0
