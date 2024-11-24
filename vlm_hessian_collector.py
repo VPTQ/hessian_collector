@@ -320,7 +320,7 @@ def main(args):
             continue
         
         with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=30)
+            outputs = model.generate(**inputs, max_new_tokens=1)
             print(f"index: {idx}, processing {image_file}:")
             # print(processor.decode(outputs[0]))
             print("-" * 50)
