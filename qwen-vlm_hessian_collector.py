@@ -22,7 +22,7 @@ from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoPro
 from accelerate import Accelerator
 from accelerate import dispatch_model
 
-from dataset import sample_rp1t
+import pickle
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
@@ -35,6 +35,11 @@ parser.add_argument('--save_mem', default=False, type=bool)
 parser.add_argument('--image_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/images', type=str)
 parser.add_argument('--text_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/texts', type=str)
 parser.add_argument('--max_samples', default=10000, type=int)
+parser.add_argument('--load_file_list', default=None, type=str)
+parser.add_argument('--store_file_list', default=None, type=str)
+parser.add_argument('--num_part', default=1, type=int)
+parser.add_argument('--part_id', default=0, type=int)
+parser.add_argument('--start_idx', default=0, type=int)
 
 def move_fn(in_q, async_copy_speed):
     # async copy to avoid slow disk
@@ -229,9 +234,8 @@ def main(args):
     # device_map = dispatch_model(model, device_map="auto")
     # transformer_layers = distribute_layers_across_gpus(model, num_gpus)
     print("loaded model!")
+    model = model.eval()
     model = accelerator.prepare(model)
-    
-     
     hooks = []
     for layer_idx, layer in enumerate(model.named_modules()):
         print(f'layer_idx: {layer_idx}, layer: {layer}')
@@ -242,9 +246,20 @@ def main(args):
     
     print(f"hooks: {hooks}")
 
-    image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
-    # shuffle
-    random.shuffle(image_files)
+    if args.load_file_list is not None:
+        with open(args.load_file_list, 'rb') as f:
+            image_files = pickle.load(f)
+        print(f'load file list to {args.load_file_list}')
+    else: 
+        image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
+        # shuffle
+        random.shuffle(image_files)
+        if args.store_file_list is not None:
+            with open(args.store_file_list, 'wb') as f:
+                pickle.dump(image_files, f)
+            print(f'store file list to {args.store_file_list}')
+
+    image_files = image_files[args.start_idx:]
     image_files = image_files[:args.max_samples]
     
     min_pixels = 256*28*28
@@ -275,6 +290,17 @@ def main(args):
         #         {"type": "text", "text": text}
         #     ]}
         # ]
+        
+        def _truncate_and_decode(text, tokenizer, max_length):
+            # Encode the text with truncation
+            encoded = tokenizer.encode(text)    
+            encoded = encoded[:max_length]
+            # Decode the truncated text
+            truncated_text = tokenizer.decode(encoded, skip_special_tokens=True)
+            return truncated_text
+
+        text = _truncate_and_decode(text, processor.tokenizer, 8192) 
+        
         messages = [
             {   "role": "user",
                 "content": [
@@ -307,13 +333,13 @@ def main(args):
             continue
         
         with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=30)
+            outputs = model.generate(**inputs, max_new_tokens=1)
             print(f"index: {idx}, processing {image_file}:")
             # print(processor.decode(outputs[0]))
             print("-" * 50)
             
         idx += 1
-        if idx % 5 == 0:
+        if idx % 1 == 0:
             print(f"Processed {idx} samples")
             clean()
     
