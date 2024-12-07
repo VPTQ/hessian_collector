@@ -153,6 +153,7 @@ def main(args):
     print("loaded model!")
     model = model.eval()
     model = accelerator.prepare(model)
+    
     hooks = []
     for layer_idx, layer in enumerate(model.named_modules()):
         print(f'layer_idx: {layer_idx}, layer: {layer}')
@@ -162,23 +163,30 @@ def main(args):
             hooks.append((f"{layer[0]}", hook))
     
     print(f"hooks: {hooks}")
-
     
-    idx = 0
     for idx in range(args.max_samples):
-        input_ids = dev_emb[idx]
+        # input_ids = dev_emb[idx]
          
         device = accelerator.device
+        input_ids = devset[idx].to(device)  # Use devset instead of dev_emb
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)  # Add batch dimension
+        
+        attention_mask = torch.ones_like(input_ids)
         
         with torch.no_grad():
-            outputs = model.generate(input_ids, max_new_tokens=1)
+            outputs = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=1,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
             print(f"index: {idx}, processing {input_ids.shape}:")
             print("-" * 50)
             
-        idx += 1
-        if idx % 1 == 0:
-            print(f"Processed {idx} samples")
-            clean()
+        print(f"Processed {idx} samples")
+        clean()
     
     # save hessians
     clean() 
