@@ -275,7 +275,7 @@ def main(args):
         with open(args.load_file_list, 'rb') as f:
             image_files = pickle.load(f)
         print(f'load file list to {args.load_file_list}')
-    else: 
+    else:
         image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
         # shuffle
         random.shuffle(image_files)
@@ -284,6 +284,7 @@ def main(args):
                 pickle.dump(image_files, f)
             print(f'store file list to {args.store_file_list}')
 
+    image_files = image_files[args.start_idx:args.start_idx + args.max_samples]
 
     idx = 0
     for image_file in image_files:
@@ -310,30 +311,19 @@ def main(args):
 
         device = accelerator.device
 
-        pixel_values = load_image(os.path.join(args.image_dir, image_file), max_num=8).to(torch.bfloat16).to(device)
-        # text = tokenizer(text, return_tensors="pt").to(device)
-        # print(f'pixel_values: {pixel_values.shape}, text: {text.shape}')
-        with torch.no_grad():
-            # outputs = model.generate(**inputs, max_new_tokens=1)
-            response = model.chat(tokenizer, pixel_values, text, generation_config)
-            print(f"index: {idx}, processing {image_file}:")
-            # print(processor.decode(outputs[0]))
-            print("-" * 50)
-          
-        # try:
-        #     pixel_values = load_image(os.path.join(args.image_dir, image_file), max_num=12).to(torch.bfloat16).to(device)
-        #     text = tokenizer(text, return_tensors="pt").to(device)
-        #     # print(f'pixel_values: {pixel_values.shape}, text: {text.shape}')
-        #     with torch.no_grad():
-        #         # outputs = model.generate(**inputs, max_new_tokens=1)
-        #         response = model.chat(tokenizer, pixel_values, text, generation_config)
-        #         print(f"index: {idx}, processing {image_file}:")
-        #         # print(processor.decode(outputs[0]))
-        #         print("-" * 50)
-        #      
-        # except Exception as e:
-        #     print(f"Error processing {image_file}: {e}")
-        #     continue
+        try:
+            pixel_values = load_image(os.path.join(args.image_dir, image_file), max_num=8).to(torch.bfloat16).to(device)
+            # text = tokenizer(text, return_tensors="pt").to(device)
+            # print(f'pixel_values: {pixel_values.shape}, text: {text.shape}')
+            with torch.no_grad():
+                # outputs = model.generate(**inputs, max_new_tokens=1)
+                response = model.chat(tokenizer, pixel_values, text, generation_config)
+                print(f"index: {idx}, processing {image_file}:")
+                # print(processor.decode(outputs[0]))
+                print("-" * 50)
+        except Exception as e:
+            print(f"Error processing {image_file}: {e}")
+            continue
         
         idx += 1
         if idx % 1 == 0:
