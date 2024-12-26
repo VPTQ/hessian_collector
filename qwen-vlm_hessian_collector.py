@@ -12,11 +12,12 @@ import psutil
 import torch
 import torch.cuda.streams
 import torch.multiprocessing as mp
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+# from transformers import AutoModelForCausalLM, AutoTokenizer
+# from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 import torch
 from PIL import Image
-from transformers import MllamaForConditionalGeneration, AutoProcessor
+# from transformers import MllamaForConditionalGeneration, AutoProcessor
+from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
 
 from accelerate import Accelerator
 from accelerate import dispatch_model
@@ -214,7 +215,16 @@ def main(args):
         print(f"Total GPUs available: {torch.cuda.device_count()}")
 
     print("loading model...")
-    model = MllamaForConditionalGeneration.from_pretrained(
+    # model = MllamaForConditionalGeneration.from_pretrained(
+    #     args.base_model,
+    #     low_cpu_mem_usage=True,
+    #     torch_dtype=torch.bfloat16,
+    #     use_flash_attention_2=False,
+    #     device_map="auto",
+    #     # _attn_implementation="sdpa"
+    # )
+
+    model = Qwen2VLForConditionalGeneration.from_pretrained(
         args.base_model,
         torch_dtype="auto",
         use_flash_attention_2=False,
@@ -227,27 +237,15 @@ def main(args):
     model = model.eval()
     model = accelerator.prepare(model)
     hooks = []
-    # HACK: split odd/even layers
     for layer_idx, layer in enumerate(model.named_modules()):
         print(f'layer_idx: {layer_idx}, layer: {layer}')
-        # language_model.model.layers.0.mlp.down_proj.pt
-        parts = layer[0].split('.')
-        print(parts)
-        try:
-            # Try to parse the layer index from parts that typically contain numbers
-            model_layer_idx = int(parts[3])
-        except (IndexError, ValueError):
-            model_layer_idx = 0
-            continue
-        
-        if isinstance(layer[1], torch.nn.Linear) and model_layer_idx % args.num_part == args.part_id:
-        # if isinstance(layer[1], torch.nn.Linear) and 'language_model.model' in layer[0]:
+        if isinstance(layer[1], torch.nn.Linear):
             device = next(layer[1].parameters()).device
             hook = register_H_hook(layer[1], device, args.save_mem)
             hooks.append((f"{layer[0]}", hook))
     
     print(f"hooks: {hooks}")
-    
+
     if args.load_file_list is not None:
         with open(args.load_file_list, 'rb') as f:
             image_files = pickle.load(f)
@@ -264,9 +262,13 @@ def main(args):
     image_files = image_files[args.start_idx:]
     image_files = image_files[:args.max_samples]
     
-   
-    processor = AutoProcessor.from_pretrained(args.base_model)
+    min_pixels = 256*28*28
+    max_pixels = 1280*28*28
     
+    processor = AutoProcessor.from_pretrained(args.base_model,
+                                              min_pixels=min_pixels,
+                                              max_pixels=max_pixels,)
+
     idx = 0
     for image_file in image_files:
         # Get corresponding text file name (assuming same base name, different extension)
@@ -282,7 +284,13 @@ def main(args):
         with open(text_file, "r") as f:
             text = f.read()
         
-        # truncate input text
+        # messages = [
+        #     {"role": "user", "content": [
+        #         {"type": "image"},
+        #         {"type": "text", "text": text}
+        #     ]}
+        # ]
+        
         def _truncate_and_decode(text, tokenizer, max_length):
             # Encode the text with truncation
             encoded = tokenizer.encode(text)    
@@ -294,27 +302,32 @@ def main(args):
         text = _truncate_and_decode(text, processor.tokenizer, 8192) 
         
         messages = [
-            {"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": text}
-            ]}
+            {   "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                    },
+                    {"type": "text", "text": text},
+                ],
+            }
         ]
-         
+        
         input_text = processor.apply_chat_template(messages, add_generation_prompt=True,
                                                    max_length=8192, truncation=True)
         device = accelerator.device
         
-        # print(f"input_text: {input_text}")
-        # print(f'len input_text: {len(input_text)}')
-         
         try:
+            # inputs = processor(
+            #     image,
+            #     input_text,
+            #     add_special_tokens=False,
+            #     return_tensors="pt"
+            # ).to(device)
+            
             inputs = processor(
-                image,
-                input_text,
-                add_special_tokens=False,
-                return_tensors="pt",
+               text=[input_text], images=[image], padding=True, return_tensors="pt",
             ).to(device)
-
+             
         except Exception as e:
             print(f"Error processing {image_file}: {e}")
             continue
@@ -346,7 +359,6 @@ def main(args):
         
         mu = mu.to('cpu')
         H = H.to('cpu')
-        ct = ct
        
         save_path = f"{args.save_path}/{hook[0]}.pt"
         torch.save({

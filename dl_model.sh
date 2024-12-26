@@ -1,4 +1,6 @@
 # pip install hf_transfer
-HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download 'meta-llama/Llama-3.2-11B-Vision-Instruct' 
+huggingface-cli download 'Qwen/Qwen2-VL-72B-Instruct' 
 
-HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download 'meta-llama/Llama-3.2-90B-Vision-Instruct' 
+huggingface-cli download 'Qwen/Qwen2-VL-7B-Instruct' 
+
+huggingface-cli download 'Qwen/Qwen2-VL-2B-Instruct' 

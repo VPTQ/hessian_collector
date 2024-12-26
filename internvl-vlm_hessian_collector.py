@@ -12,23 +12,29 @@ import psutil
 import torch
 import torch.cuda.streams
 import torch.multiprocessing as mp
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+# from transformers import AutoModelForCausalLM, AutoTokenizer
+# from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 import torch
 from PIL import Image
-from transformers import MllamaForConditionalGeneration, AutoProcessor
+# from transformers import MllamaForConditionalGeneration, AutoProcessor
+# from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+from transformers import AutoModel, AutoTokenizer
 
 from accelerate import Accelerator
 from accelerate import dispatch_model
 
 import pickle
+import math
+
+import torchvision.transforms as T
+from torchvision.transforms.functional import InterpolationMode
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', default=0, type=int)
-parser.add_argument('--base_model', default='meta-llama/Llama-3.2-90B-Vision-Instruct', type=str)
-parser.add_argument('--save_path', default='Hessians-Llama_32-90B-Vision-Instruct', type=str)
+parser.add_argument('--base_model', default='OpenGVLab/InternVL2_5-78B', type=str)
+parser.add_argument('--save_path', default='Hessians-InternVL2_5-78B', type=str)
 parser.add_argument('--sample_proc', default=4, type=int)
 parser.add_argument('--save_mem', default=False, type=bool)
 parser.add_argument('--image_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/images', type=str)
@@ -112,86 +118,79 @@ def sym_to_flat(A):
     idxs = torch.tril_indices(N, N, device=A.device)
     return A[idxs.unbind()]
 
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
-# def forward_layer(layer, position_ids, attention_mask, bs, device, in_q, out_q):
-#     torch.set_grad_enabled(False)
-#     layer = layer.to(device)
-#     position_ids = position_ids.to(device)
-#     attention_mask = attention_mask.to(device)
-# 
-#     # Register hooks for all Linear layers in the current transformer layer
-#     hooks = []
-#     for name, module in layer.named_modules():
-#         if isinstance(module, torch.nn.Linear):
-#             hook, layer_name = register_H_hook(module, device, f"{layer.name}.{name}")
-#             hooks.append(hook)
-# 
-#     while True:
-#         dev_emb = in_q.get()
-#         if dev_emb is None:
-#             layer = layer.cpu()
-#             position_ids = position_ids.cpu()
-#             attention_mask = attention_mask.cpu()
-#             results = {hook.__name__: hook() for hook in hooks}
-#             out_q.put(results)
-#             return
-# 
-#         assert len(dev_emb) % bs == 0
-#         for i in range(len(dev_emb) // bs):
-#             batch = dev_emb[i * bs:(i + 1) * bs].to(device)
-#             with torch.cuda.stream(torch.cuda.Stream()):
-#                 output = layer(
-#                     batch,
-#                     position_ids=position_ids,
-#                     attention_mask=attention_mask,
-#                     use_cache=False,
-#                     output_attentions=False
-#                 )[0]
-#                 dev_emb[i:i + bs] = output.cpu()
-#                 del output
-# 
-#             # Clear cache every 4 batches
-#             if i % (bs * 4) == 0:
-#                 torch.cuda.empty_cache()
-#                 
+def build_transform(input_size):
+    MEAN, STD = IMAGENET_MEAN, IMAGENET_STD
+    transform = T.Compose([
+        T.Lambda(lambda img: img.convert('RGB') if img.mode != 'RGB' else img),
+        T.Resize((input_size, input_size), interpolation=InterpolationMode.BICUBIC),
+        T.ToTensor(),
+        T.Normalize(mean=MEAN, std=STD)
+    ])
+    return transform
 
-# def accumulate(in_q, move_q, ngpus, args, transformer_layer_index):
-#     Hs = {}
-#     mus = {}
-#     cts = {}
-# 
-#     for i in range(ngpus):
-#         out = in_q.get()
-#         if i == 0:
-#             for key in out:
-#                 Hs[key] = torch.zeros(out[key][0].shape, dtype=out[key][0].dtype)
-#                 mus[key] = torch.zeros(out[key][1].shape, dtype=out[key][1].dtype)
-#                 cts[key] = 0
-#         for key in out:
-#             Hs[key].add_(out[key][0])
-#             mus[key].add_(out[key][1])
-#             cts[key] += out[key][2]
-# 
-#     # keys = list(Hs.keys())
-# 
-#     for key in Hs:
-#         mus[key].div_(cts[key])
-#         Hs[key].div_(cts[key])
-#         Hs[key].addmm_(-mus[key].unsqueeze(-1), mus[key].unsqueeze(0))
-#         save_path = f"{args.scratch_path}/{transformer_layer_index}_{key}.pt" if args.scratch_path is not None else f"{args.save_path}/{transformer_layer_index}_{key}.pt"
-#         torch.save({
-#             'flatH': sym_to_flat(Hs[key].to(torch.float32)),
-#             'mu': mus[key].to(torch.float32),
-#             'n': Hs[key].shape[0],
-#             'ct': cts[key]
-#         }, save_path)
-#         if args.scratch_path is not None:
-#             move_q.put((
-#                 f"{args.scratch_path}/{transformer_layer_index}_{key}.pt",
-#                 f"{args.save_path}/{transformer_layer_index}_{key}.pt"
-#             ))
-# 
-#     del Hs, mus, cts, out
+def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
+    best_ratio_diff = float('inf')
+    best_ratio = (1, 1)
+    area = width * height
+    for ratio in target_ratios:
+        target_aspect_ratio = ratio[0] / ratio[1]
+        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
+        if ratio_diff < best_ratio_diff:
+            best_ratio_diff = ratio_diff
+            best_ratio = ratio
+        elif ratio_diff == best_ratio_diff:
+            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
+                best_ratio = ratio
+    return best_ratio
+
+def dynamic_preprocess(image, min_num=1, max_num=12, image_size=448, use_thumbnail=False):
+    orig_width, orig_height = image.size
+    aspect_ratio = orig_width / orig_height
+
+    # calculate the existing image aspect ratio
+    target_ratios = set(
+        (i, j) for n in range(min_num, max_num + 1) for i in range(1, n + 1) for j in range(1, n + 1) if
+        i * j <= max_num and i * j >= min_num)
+    target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
+
+    # find the closest aspect ratio to the target
+    target_aspect_ratio = find_closest_aspect_ratio(
+        aspect_ratio, target_ratios, orig_width, orig_height, image_size)
+
+    # calculate the target width and height
+    target_width = image_size * target_aspect_ratio[0]
+    target_height = image_size * target_aspect_ratio[1]
+    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
+
+    # resize the image
+    resized_img = image.resize((target_width, target_height))
+    processed_images = []
+    for i in range(blocks):
+        box = (
+            (i % (target_width // image_size)) * image_size,
+            (i // (target_width // image_size)) * image_size,
+            ((i % (target_width // image_size)) + 1) * image_size,
+            ((i // (target_width // image_size)) + 1) * image_size
+        )
+        # split the image
+        split_img = resized_img.crop(box)
+        processed_images.append(split_img)
+    assert len(processed_images) == blocks
+    if use_thumbnail and len(processed_images) != 1:
+        thumbnail_img = image.resize((image_size, image_size))
+        processed_images.append(thumbnail_img)
+    return processed_images
+
+def load_image(image_file, input_size=448, max_num=12):
+    image = Image.open(image_file).convert('RGB')
+    transform = build_transform(input_size=input_size)
+    images = dynamic_preprocess(image, image_size=input_size, use_thumbnail=True, max_num=max_num)
+    pixel_values = [transform(image) for image in images]
+    pixel_values = torch.stack(pixel_values)
+    return pixel_values
 
 def clean():
     gc.collect()
@@ -214,45 +213,69 @@ def main(args):
         print(f"Total GPUs available: {torch.cuda.device_count()}")
 
     print("loading model...")
-    model = MllamaForConditionalGeneration.from_pretrained(
+
+    def split_model(model_name):
+        device_map = {}
+        world_size = torch.cuda.device_count()
+        num_layers = {
+            'InternVL2_5-1B': 24, 'InternVL_5-2B': 24, 'InternVL2_5-4B': 36, 'InternVL2_5-8B': 32,
+            'InternVL2_5-26B': 48, 'InternVL2_5-38B': 64, 'InternVL2_5-78B': 80}[model_name]
+        # Since the first GPU will be used for ViT, treat it as 0.25 a GPU.
+        num_layers_per_gpu = math.ceil(num_layers / (world_size - 0.1))
+        num_layers_per_gpu = [num_layers_per_gpu] * world_size
+        num_layers_per_gpu[0] = math.ceil(num_layers_per_gpu[0] * 0.1)
+        layer_cnt = 0
+        for i, num_layer in enumerate(num_layers_per_gpu):
+            for j in range(num_layer):
+                device_map[f'language_model.model.layers.{layer_cnt}'] = i
+                layer_cnt += 1
+        device_map['vision_model'] = 0
+        device_map['mlp1'] = 0
+        device_map['language_model.model.tok_embeddings'] = 0
+        device_map['language_model.model.embed_tokens'] = 0
+        device_map['language_model.output'] = 0
+        device_map['language_model.model.norm'] = 0
+        device_map['language_model.lm_head'] = 0
+        device_map[f'language_model.model.layers.{num_layers - 1}'] = 0
+
+        return device_map
+
+    device_map = split_model(args.base_model.split('/')[-1])
+    model = AutoModel.from_pretrained(
         args.base_model,
-        torch_dtype="auto",
-        use_flash_attention_2=False,
-        device_map="auto",
-    )
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        use_flash_attn=False,
+        trust_remote_code=True,
+        device_map=device_map).eval()
+
+    model.language_model.model.rotary_emb = model.language_model.model.rotary_emb.to('cuda:0')
+
     model.tie_weights()
     # device_map = dispatch_model(model, device_map="auto")
     # transformer_layers = distribute_layers_across_gpus(model, num_gpus)
     print("loaded model!")
     model = model.eval()
     model = accelerator.prepare(model)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model, trust_remote_code=True, use_fast=False)
+    generation_config = dict(max_new_tokens=1, do_sample=False)
+    
     hooks = []
-    # HACK: split odd/even layers
     for layer_idx, layer in enumerate(model.named_modules()):
         print(f'layer_idx: {layer_idx}, layer: {layer}')
-        # language_model.model.layers.0.mlp.down_proj.pt
-        parts = layer[0].split('.')
-        print(parts)
-        try:
-            # Try to parse the layer index from parts that typically contain numbers
-            model_layer_idx = int(parts[3])
-        except (IndexError, ValueError):
-            model_layer_idx = 0
-            continue
-        
-        if isinstance(layer[1], torch.nn.Linear) and model_layer_idx % args.num_part == args.part_id:
-        # if isinstance(layer[1], torch.nn.Linear) and 'language_model.model' in layer[0]:
+        if isinstance(layer[1], torch.nn.Linear):
             device = next(layer[1].parameters()).device
             hook = register_H_hook(layer[1], device, args.save_mem)
             hooks.append((f"{layer[0]}", hook))
     
     print(f"hooks: {hooks}")
-    
+
     if args.load_file_list is not None:
         with open(args.load_file_list, 'rb') as f:
             image_files = pickle.load(f)
         print(f'load file list to {args.load_file_list}')
-    else: 
+    else:
         image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
         # shuffle
         random.shuffle(image_files)
@@ -261,12 +284,8 @@ def main(args):
                 pickle.dump(image_files, f)
             print(f'store file list to {args.store_file_list}')
 
-    image_files = image_files[args.start_idx:]
-    image_files = image_files[:args.max_samples]
-    
-   
-    processor = AutoProcessor.from_pretrained(args.base_model)
-    
+    image_files = image_files[args.start_idx:args.start_idx + args.max_samples]
+
     idx = 0
     for image_file in image_files:
         # Get corresponding text file name (assuming same base name, different extension)
@@ -276,13 +295,10 @@ def main(args):
         if not os.path.exists(text_file):
             print(f"Warning: No matching text file for {image_file}, skipping...")
             continue
-            
-        # Load image and text
-        image = Image.open(os.path.join(args.image_dir, image_file))
+        
         with open(text_file, "r") as f:
             text = f.read()
-        
-        # truncate input text
+                
         def _truncate_and_decode(text, tokenizer, max_length):
             # Encode the text with truncation
             encoded = tokenizer.encode(text)    
@@ -291,40 +307,24 @@ def main(args):
             truncated_text = tokenizer.decode(encoded, skip_special_tokens=True)
             return truncated_text
 
-        text = _truncate_and_decode(text, processor.tokenizer, 8192) 
-        
-        messages = [
-            {"role": "user", "content": [
-                {"type": "image"},
-                {"type": "text", "text": text}
-            ]}
-        ]
-         
-        input_text = processor.apply_chat_template(messages, add_generation_prompt=True,
-                                                   max_length=8192, truncation=True)
-        device = accelerator.device
-        
-        # print(f"input_text: {input_text}")
-        # print(f'len input_text: {len(input_text)}')
-         
-        try:
-            inputs = processor(
-                image,
-                input_text,
-                add_special_tokens=False,
-                return_tensors="pt",
-            ).to(device)
+        text = _truncate_and_decode(text, tokenizer, 8192) 
 
+        device = accelerator.device
+
+        try:
+            pixel_values = load_image(os.path.join(args.image_dir, image_file), max_num=8).to(torch.bfloat16).to(device)
+            # text = tokenizer(text, return_tensors="pt").to(device)
+            # print(f'pixel_values: {pixel_values.shape}, text: {text.shape}')
+            with torch.no_grad():
+                # outputs = model.generate(**inputs, max_new_tokens=1)
+                response = model.chat(tokenizer, pixel_values, text, generation_config)
+                print(f"index: {idx}, processing {image_file}:")
+                # print(processor.decode(outputs[0]))
+                print("-" * 50)
         except Exception as e:
             print(f"Error processing {image_file}: {e}")
             continue
         
-        with torch.no_grad():
-            outputs = model.generate(**inputs, max_new_tokens=1)
-            print(f"index: {idx}, processing {image_file}:")
-            # print(processor.decode(outputs[0]))
-            print("-" * 50)
-            
         idx += 1
         if idx % 1 == 0:
             print(f"Processed {idx} samples")
@@ -346,7 +346,6 @@ def main(args):
         
         mu = mu.to('cpu')
         H = H.to('cpu')
-        ct = ct
        
         save_path = f"{args.save_path}/{hook[0]}.pt"
         torch.save({
