@@ -15,7 +15,7 @@ import torch.multiprocessing as mp
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 
-from dataset import sample_rp1t
+from cli_datasets import sample_rp1t
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
