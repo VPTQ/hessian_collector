@@ -6,10 +6,6 @@ channels:
 dependencies:
   - python=3.10
   - ninja
-  - pytorch>=2.4.0
-  - torchvision
-  - torchaudio
-  - pytorch-cuda=12.1
   - pip
   - pip:
     - accelerate
