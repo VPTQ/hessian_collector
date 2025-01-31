@@ -1,0 +1,307 @@
+# from https://github.com/Cornell-RelaxML/quip-sharp/blob/main/quantize_llama/hessian_offline_llama.py
+# ref: https://huggingface.co/Qwen/Qwen2.5-VL-72B-Instruct
+# pip install qwen-vl-utils[decord]==0.0.8
+# from lib import utils
+import argparse
+import datetime
+import gc
+import os
+import random
+
+import numpy
+import psutil
+import torch
+import torch.cuda.streams
+import torch.multiprocessing as mp
+# from transformers import AutoModelForCausalLM, AutoTokenizer
+# from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
+import torch
+from PIL import Image
+# from transformers import MllamaForConditionalGeneration, AutoProcessor
+# from transformers import Qwen2VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+from qwen_vl_utils import process_vision_info
+
+
+from accelerate import Accelerator
+from accelerate import dispatch_model
+
+import pickle
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--seed', default=0, type=int)
+parser.add_argument('--base_model', default='meta-llama/Llama-3.2-90B-Vision-Instruct', type=str)
+parser.add_argument('--save_path', default='Hessians-Llama_32-90B-Vision-Instruct', type=str)
+parser.add_argument('--sample_proc', default=4, type=int)
+parser.add_argument('--save_mem', default=False, type=bool)
+parser.add_argument('--image_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/images', type=str)
+parser.add_argument('--text_dir', default='/home/aiscuser/yangwang/omnicorpus_samples/texts', type=str)
+parser.add_argument('--max_samples', default=10000, type=int)
+parser.add_argument('--load_file_list', default=None, type=str)
+parser.add_argument('--store_file_list', default=None, type=str)
+parser.add_argument('--num_part', default=1, type=int)
+parser.add_argument('--part_id', default=0, type=int)
+parser.add_argument('--start_idx', default=0, type=int)
+
+def move_fn(in_q, async_copy_speed):
+    # async copy to avoid slow disk
+    while True:
+        item = in_q.get()
+        if item is None:
+            return
+        src, tgt = item
+        if async_copy_speed > 0:
+            os.system(f'rsync --bwlimit={async_copy_speed} {src} {tgt}')
+        else:
+            os.system(f'rsync {src} {tgt}')
+        os.system(f'rm {src}')
+        print(f'moved {src} to {tgt}')
+
+
+def register_H_hook(module, device, save_mem):
+    compute_device = device
+    n = module.in_features
+    if save_mem:
+        H = torch.zeros(n, n, dtype=torch.float64, device='cpu')
+        mu = torch.zeros(n, dtype=torch.float64, device='cpu')
+    else:
+        H = torch.zeros(n, n, dtype=torch.float64, device=compute_device)
+        mu = torch.zeros(n, dtype=torch.float64, device=compute_device)
+    ct = 0
+
+    def H_hook(module, x):
+        nonlocal H, mu, ct, n
+        
+        # Handle tuple input - take first element
+        if isinstance(x, tuple):
+            x = x[0]
+        
+        # move to compute device
+        x = x.to(compute_device)
+        H = H.to(compute_device)
+        mu = mu.to(compute_device)
+        x = x.reshape(-1, n).to(torch.float64)
+        mu.add_(x.sum(dim=0))
+        H.addmm_(x.T, x)
+        ct += len(x)
+
+        del x
+        torch.cuda.empty_cache()
+        # move back to cpu to save memory
+        if save_mem:
+            H = H.to('cpu')
+            mu = mu.to('cpu')
+
+    hook = module.register_forward_pre_hook(H_hook)
+
+    def done():
+        nonlocal H, mu, ct, hook
+        hook.remove()
+        return H.cpu(), mu.cpu(), ct
+
+    return done
+
+
+def flat_to_sym(V, N):
+    A = torch.zeros(N, N, dtype=V.dtype, device=V.device)
+    idxs = torch.tril_indices(N, N, device=V.device)
+    A[idxs.unbind()] = V
+    A[idxs[1, :], idxs[0, :]] = V
+    return A
+
+
+def sym_to_flat(A):
+    N = A.shape[-1]
+    idxs = torch.tril_indices(N, N, device=A.device)
+    return A[idxs.unbind()]
+
+def clean():
+    gc.collect()
+    torch.cuda.empty_cache()
+
+def find_linear_layers(model):
+    linear_layers = []
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            linear_layers.append((name, module))
+    return linear_layers
+
+
+def main(args):
+    accelerator = Accelerator()
+    local_rank = accelerator.local_process_index
+    num_gpus = torch.cuda.device_count()
+     
+    if accelerator.is_main_process:
+        print(f"Total GPUs available: {torch.cuda.device_count()}")
+
+    print("loading model...")
+    # model = MllamaForConditionalGeneration.from_pretrained(
+    #     args.base_model,
+    #     low_cpu_mem_usage=True,
+    #     torch_dtype=torch.bfloat16,
+    #     use_flash_attention_2=False,
+    #     device_map="auto",
+    #     # _attn_implementation="sdpa"
+    # )
+
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        args.base_model,
+        torch_dtype="auto",
+        use_flash_attention_2=False,
+        device_map="auto",
+    )
+    
+    model.tie_weights()
+    # device_map = dispatch_model(model, device_map="auto")
+    # transformer_layers = distribute_layers_across_gpus(model, num_gpus)
+    print("loaded model!")
+    model = model.eval()
+    model = accelerator.prepare(model)
+    hooks = []
+    for layer_idx, layer in enumerate(model.named_modules()):
+        print(f'layer_idx: {layer_idx}, layer: {layer}')
+        if isinstance(layer[1], torch.nn.Linear):
+            device = next(layer[1].parameters()).device
+            hook = register_H_hook(layer[1], device, args.save_mem)
+            hooks.append((f"{layer[0]}", hook))
+    
+    print(f"hooks: {hooks}")
+
+    if args.load_file_list is not None:
+        with open(args.load_file_list, 'rb') as f:
+            image_files = pickle.load(f)
+        print(f'load file list to {args.load_file_list}')
+    else: 
+        image_files = sorted([f for f in os.listdir(args.image_dir) if f.endswith(('.jpg', '.jpeg', '.png'))])
+        # shuffle
+        random.shuffle(image_files)
+        if args.store_file_list is not None:
+            with open(args.store_file_list, 'wb') as f:
+                pickle.dump(image_files, f)
+            print(f'store file list to {args.store_file_list}')
+
+    image_files = image_files[args.start_idx:]
+    image_files = image_files[:args.max_samples]
+    
+    min_pixels = 256*28*28
+    max_pixels = 1280*28*28
+    
+    processor = AutoProcessor.from_pretrained(args.base_model,
+                                              min_pixels=min_pixels,
+                                              max_pixels=max_pixels,)
+
+    idx = 0
+    for image_file in image_files:
+        # Get corresponding text file name (assuming same base name, different extension)
+        base_name = os.path.splitext(image_file)[0]
+        text_file = os.path.join(args.text_dir, f"{base_name}.txt")
+        
+        if not os.path.exists(text_file):
+            print(f"Warning: No matching text file for {image_file}, skipping...")
+            continue
+            
+        # Load image and text
+        image = Image.open(os.path.join(args.image_dir, image_file))
+        with open(text_file, "r") as f:
+            text = f.read()
+        
+        # messages = [
+        #     {"role": "user", "content": [
+        #         {"type": "image"},
+        #         {"type": "text", "text": text}
+        #     ]}
+        # ]
+        
+        def _truncate_and_decode(text, tokenizer, max_length):
+            # Encode the text with truncation
+            encoded = tokenizer.encode(text)    
+            encoded = encoded[:max_length]
+            # Decode the truncated text
+            truncated_text = tokenizer.decode(encoded, skip_special_tokens=True)
+            return truncated_text
+
+        text = _truncate_and_decode(text, processor.tokenizer, 8192) 
+        
+        messages = [
+            {   "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                    },
+                    {"type": "text", "text": text},
+                ],
+            }
+        ]
+        
+        input_text = processor.apply_chat_template(messages, add_generation_prompt=True,
+                                                   max_length=8192, truncation=True)
+        device = accelerator.device
+        
+        try:
+            # inputs = processor(
+            #     image,
+            #     input_text,
+            #     add_special_tokens=False,
+            #     return_tensors="pt"
+            # ).to(device)
+            
+            inputs = processor(
+               text=[input_text], images=[image], padding=True, return_tensors="pt",
+            ).to(device)
+             
+        except Exception as e:
+            print(f"Error processing {image_file}: {e}")
+            continue
+        
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_new_tokens=1)
+            print(f"index: {idx}, processing {image_file}:")
+            # print(processor.decode(outputs[0]))
+            print("-" * 50)
+            
+        idx += 1
+        if idx % 1 == 0:
+            print(f"Processed {idx} samples")
+            clean()
+    
+    # save hessians
+    clean() 
+    os.makedirs(args.save_path, exist_ok=True)
+    for hook in hooks:
+        H, mu, ct = hook[1]()
+        print(f'save hook: {hook[0]}, H: {H.shape}, mu: {mu.shape}, ct: {ct}')
+
+        mu = mu.to('cuda')
+        H = H.to('cuda')
+        
+        mu = mu.div_(ct)
+        H = H.div_(ct)
+        H = H.addmm_(-mu.unsqueeze(-1), mu.unsqueeze(0))
+        
+        mu = mu.to('cpu')
+        H = H.to('cpu')
+       
+        save_path = f"{args.save_path}/{hook[0]}.pt"
+        torch.save({
+            'flatH': sym_to_flat(H.to(torch.float32)),
+            'mu': mu.to(torch.float32),
+            'n': H.shape[0],
+            'ct': ct
+        }, save_path)
+        
+        del H, mu
+        clean()
+
+if __name__ == "__main__":
+    mp.set_start_method('spawn')
+    torch.set_grad_enabled(False)
+    args = parser.parse_args()
+    torch.manual_seed(args.seed)
+    random.seed(args.seed)
+    numpy.random.seed(args.seed)
+    os.makedirs(args.save_path, exist_ok=True)
+    main(args)
+
