@@ -26,7 +26,7 @@ def sample_rp1t(tokenizer, size=128, ctx_size=2048, nproc=1):
                         good = good[:size - saved]
                     devset[saved:saved + len(good)] = tokens[i].input_ids[good]
                     saved += len(good)
-                    print(saved)
+                    print(f'saved {saved} sequences')
     else:
         while saved < size:
             tokens = tokenizer(
