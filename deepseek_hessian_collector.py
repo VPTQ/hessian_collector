@@ -34,7 +34,7 @@ parser.add_argument('--ctx_size', default=8192, type=int)
 parser.add_argument('--tokenizer_path', default=None, type=str)
 parser.add_argument('--dry_run', action='store_true')
 parser.add_argument('--config', default='config.json', type=str)
-parser.add_argument('--devset_size', default=256, type=int)
+
 
 def register_H_hook(module, device):
     n = module.in_features
