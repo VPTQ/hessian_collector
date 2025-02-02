@@ -90,13 +90,15 @@ def clean():
     gc.collect()
     torch.cuda.empty_cache()
 
+# input: w1 = w3
 def find_linear_layers(module):
     linear_layers = []
     for name, module in module.named_modules():
         if isinstance(module, Linear) \
             or isinstance(module, RowParallelLinear) \
             or isinstance(module, ColumnParallelLinear):
-            linear_layers.append((name, module))
+            if 'w3' not in name:
+                linear_layers.append((name, module))
     return linear_layers
 
 def main(args):

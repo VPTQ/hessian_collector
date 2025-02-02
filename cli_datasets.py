@@ -26,33 +26,21 @@ def sample_rp1t(tokenizer, size=128, ctx_size=2048, nproc=1):
                         good = good[:size - saved]
                     devset[saved:saved + len(good)] = tokens[i].input_ids[good]
                     saved += len(good)
-                    print(saved)
+                    print(f'saved {saved} sequences')
     else:
-        # while saved < size:
-            # tokens = tokenizer(
-            #     dataset[torch.randint(len(dataset), (size,))]['text'],
-            #     return_tensors='pt',
-            #     truncation=True,
-            #     padding=True,
-            #     max_length=ctx_size
-            # )
-            # sample = dataset[torch.randint(len(dataset), (1,))]['text']
-            # tokens = tokenizer.apply_chat_template([sample], add_generation_prompt=True)
-            # lens = len(tokens[0][1])
-            # if lens >= ctx_size:
-            #     print(f'tokens: {lens}')
-            #     devset[saved:saved + ctx_size] = tokens[0][1][:ctx_size]
-            #     saved += ctx_size
-        _tmp = "Hello, how are you?"
-        tokens = tokenizer(
-            [_tmp, _tmp, _tmp, _tmp, _tmp, _tmp, _tmp, _tmp, _tmp, _tmp],
-            return_tensors='pt',
-            truncation=True,
-            padding=True,
-            max_length=ctx_size
-        )
-        print(f'tokens: {tokens.input_ids.shape}')
-        for i, t in enumerate(tokens.input_ids):
-            devset[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cpu")
-        saved += len(tokens)
+        while saved < size:
+            tokens = tokenizer(
+                dataset[torch.randint(len(dataset), (size,))]['text'],
+                return_tensors='pt',
+                truncation=True,
+                padding=True,
+                max_length=ctx_size
+            )
+            lens = tokens.attention_mask.sum(dim=-1)
+            good = torch.where(lens == ctx_size)[0]
+            if len(good) > 0:
+                if saved + len(good) > size:
+                    good = good[:size - saved]
+                devset[saved:saved + len(good)] = tokens.input_ids[good]
+                saved += len(good)
     return devset
