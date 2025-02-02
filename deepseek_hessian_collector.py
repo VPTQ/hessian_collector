@@ -64,7 +64,6 @@ def register_H_hook(module, device):
 
     return done
 
-
 def flat_to_sym(V, N):
     A = torch.zeros(N, N, dtype=V.dtype, device=V.device)
     idxs = torch.tril_indices(N, N, device=V.device)
@@ -82,12 +81,9 @@ def hook_forward_layer(layer, device):
      
     linear_layers = find_linear_layers(layer)
     hook_list = []
-    # print(f'linear_layers: {linear_layers}')
     
     for name, module in linear_layers:
-        # print(f'name: {name}, module: {module}')
         hook_list.append((name, register_H_hook(module, device)))
-    # print(f'hook_list: {hook_list}')
     return hook_list
 
 def clean():
@@ -138,21 +134,15 @@ def main(args):
         print(f"loading dataset on rank {rank}...")
         devset = sample_rp1t(tokenizer, args.max_samples, args.ctx_size, nproc=args.sample_proc)
         devset = devset.to(f'cuda:{rank}')
-        # print(f"Rank {rank}: Dataset loaded and moved to GPU")
         clean()
     else:
         devset = torch.zeros((args.max_samples, args.ctx_size), dtype=torch.int64, device=f'cuda:{rank}')
-        #print(f"Rank {rank}: Created empty tensor for broadcast")
     
     if world_size > 1:
-        # print(f"Rank {rank}: Before broadcast")
         dist.broadcast(devset, src=0)
         dist.barrier()  # Synchronize all processes
-        # print(f"Rank {rank}: After broadcast")
     
-    # print(f"Rank {rank}: Moving dataset to CPU")
     devset = devset.to('cpu')
-    # print(f"Rank {rank}: Dataset moved to CPU. Shape: {devset.shape}")
     
     print("loading model...")
     start_time = time.time()
@@ -166,35 +156,32 @@ def main(args):
             print(f"Rank {rank}: Model load time: {time.time() - start_time:.2f}s")
         else:
             print(f"Rank {rank}: Dry run model load")
-    # print(f"Rank {rank}: Model loaded!")
     
     dev_emb = []
-    # print(f"Rank {rank}: Starting sample processing")
     
-    # print(f"Rank {rank}: Moving embed layer to GPU")
     model.embed = model.embed.to(f'cuda:{rank}')
-    # print(f"Rank {rank}: Embed layer moved to GPU")
     
     for idx in range(devset.shape[0]):
-        print(f'Rank {rank}: Starting to process sample {idx} / {devset.shape[0]}')
+        if rank == 0:
+            print(f'Starting to process sample {idx} / {devset.shape[0]}')
         try:
             _tokens = devset[idx].to(f'cuda:{rank}')
-            # print(f'Rank {rank}: Tokens moved to GPU: {_tokens.shape}')
             _dev_emb = model.embed(_tokens)
-            # print(f'Rank {rank}: Embedding completed: {_dev_emb.shape}')
             _dev_emb = _dev_emb.unsqueeze(0)
             dev_emb.append(_dev_emb.to("cpu"))
-            # print(f'Rank {rank}: Sample {idx} processed successfully')
         except Exception as e:
             print(f'Rank {rank}: Error processing sample {idx}: {str(e)}')
             raise
 
     del model.embed
     clean()
-    print(f"dev_emb: {len(dev_emb)}")
+    
+    if rank == 0:
+        print(f"dataset dev_emb size: {len(dev_emb)}")
 
     for transformer_layer_index in range(len(model.layers)):
-        print(f'processing layer {transformer_layer_index} / {len(model.layers)}')
+        if rank == 0:
+            print(f'processing layer {transformer_layer_index} / {len(model.layers)}')
         transformer_layer = model.layers[transformer_layer_index]
         
         transformer_layer = transformer_layer.to(f'cuda:{rank}')
@@ -204,7 +191,8 @@ def main(args):
          
         # inference 
         for idx in range(len(dev_emb)):
-            print(f'inference sample {idx} / {len(dev_emb)}')
+            if rank == 0:
+                print(f'inference sample {idx} / {len(dev_emb)}')
             _dev_emb = dev_emb[idx]
             _start_pos = 0
             _freqs_cis = model.freqs_cis[_start_pos:_start_pos+_dev_emb.size(1)]
@@ -229,18 +217,17 @@ def main(args):
             H, mu, ct = done()
             save_path = f'{args.save_path}/H_{transformer_layer_index}_{name}.pt'
             # Save data to disk
-            print(f'{transformer_layer_index}_{name}, H: {H.shape}, mu: {mu.shape}, ct: {ct}')
-            # torch.save({
-            #     'flatH': sym_to_flat(H.to(torch.float32)),
-            #     'mu': mu.to(torch.float32),
-            #     'n': H.shape[0],
-            #     'ct': ct
-            # }, save_path)
+            print(f'{rank}: {transformer_layer_index}_{name}, H: {H.shape}, mu: {mu.shape}, ct: {ct}')
+            torch.save({
+                'flatH': sym_to_flat(H.to(torch.float32)),
+                'mu': mu.to(torch.float32),
+                'n': H.shape[0],
+                'ct': ct
+            }, save_path)
             del H
             del mu
             clean()
         
-        print(f'free layer')
         transformer_layer.cpu()  # Move layer back to CPU before deletion
         del transformer_layer
         del hook_list
