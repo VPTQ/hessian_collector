@@ -37,7 +37,7 @@ parser.add_argument('--save_path', default='Hessians-DeepSeek-V3', type=str)
 parser.add_argument('--sample_proc', default=72, type=int)
 parser.add_argument('--save_mem', default=False, type=bool)
 parser.add_argument('--max_samples', default=2000, type=int)
-parser.add_argument('--ctx_size', default=8192, type=int)
+parser.add_argument('--ctx_size', default=4096, type=int)
 parser.add_argument('--tokenizer_path', default=None, type=str)
 parser.add_argument('--dry_run', action='store_true')
 parser.add_argument('--config', default='config.json', type=str)
@@ -68,8 +68,12 @@ def register_H_hook(module, device):
         hook = None
         H = None
         mu = None
-        ct = 0
         
+        del hook
+        del H
+        del mu
+        del ct
+
         clean()
         return H_cpu, mu_cpu, ct_copy
 
@@ -219,6 +223,10 @@ def main(args):
             torch.cuda.synchronize()
 
             dev_emb[idx] = _dev_emb.to("cpu")
+            _dev_emb = None
+            _freqs_cis = None
+            _mask = None
+            
             del _dev_emb
             del _freqs_cis
             del _mask
@@ -240,14 +248,21 @@ def main(args):
                 'n': H.shape[0],
                 'ct': ct
             }, save_path)
-            
+           
+            flatH = None
+            H = None
+            mu = None
             del flatH
             del H
             del mu
             clean()
         
+        transformer_layer = None
+        hook_list = None
+        model.layers[transformer_layer_index] = None
         del transformer_layer
         del hook_list
+        del model.layers[transformer_layer_index]
         clean()
 
     if world_size > 1:
