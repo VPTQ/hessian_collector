@@ -104,6 +104,8 @@ def hook_forward_layer(layer, device):
 def clean():
     gc.collect()
     torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 # input: w1 = w3
 def find_linear_layers(module):
@@ -198,9 +200,10 @@ def main(args):
     if rank == 0:
         print(f"dataset dev_emb size: {len(dev_emb)}")
 
-    for transformer_layer_index in range(len(model.layers)):
+    num_layers = len(model.layers)
+    for transformer_layer_index in range(num_layers):
         if rank == 0:
-            print(f'processing layer {transformer_layer_index} / {len(model.layers)}')
+            print(f'processing layer {transformer_layer_index} / {num_layers}')
         transformer_layer = model.layers[transformer_layer_index]
         
         transformer_layer = transformer_layer.to(f'cuda:{rank}')
@@ -262,7 +265,7 @@ def main(args):
         model.layers[transformer_layer_index] = None
         del transformer_layer
         del hook_list
-        del model.layers[transformer_layer_index]
+        # del model.layers[transformer_layer_index]
         clean()
 
     if world_size > 1:

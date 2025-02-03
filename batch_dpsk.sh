@@ -10,9 +10,9 @@ do
     torchrun --nnodes 1 --nproc-per-node 4 deepseek_hessian_collector.py \
         --ckpt_path ${CKPT_PATH} \
         --config ${CONFIG_PATH} \
-        --save_path Hessians-Deepseek-V3-4096-512-seed-${seed} \
+        --save_path Hessians-Deepseek-V3-6144-512-seed-${seed} \
         --max_samples 512 \
-        --ctx_size 4096 \
+        --ctx_size 6144 \
         --sample_proc 1 \
         --seed ${seed}
         
