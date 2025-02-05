@@ -7,6 +7,7 @@ import os
 import random
 import json
 import time
+import atexit
 
 import numpy
 import torch
@@ -23,6 +24,12 @@ from cli_datasets import sample_rp1t
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
+def cleanup():
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+atexit.register(cleanup)
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--seed', default=0, type=int)
 parser.add_argument('--ckpt_path', default='DeepSeek-V3-mp4', type=str)
@@ -30,11 +37,11 @@ parser.add_argument('--save_path', default='Hessians-DeepSeek-V3', type=str)
 parser.add_argument('--sample_proc', default=72, type=int)
 parser.add_argument('--save_mem', default=False, type=bool)
 parser.add_argument('--max_samples', default=2000, type=int)
-parser.add_argument('--ctx_size', default=8192, type=int)
+parser.add_argument('--ctx_size', default=4096, type=int)
 parser.add_argument('--tokenizer_path', default=None, type=str)
 parser.add_argument('--dry_run', action='store_true')
 parser.add_argument('--config', default='config.json', type=str)
-parser.add_argument('--devset_size', default=256, type=int)
+
 
 def register_H_hook(module, device):
     n = module.in_features
@@ -57,8 +64,16 @@ def register_H_hook(module, device):
         H_cpu = H.cpu()
         mu_cpu = mu.cpu()
         ct_copy = ct
+        
+        hook = None
+        H = None
+        mu = None
+        
+        del hook
         del H
         del mu
+        del ct
+
         clean()
         return H_cpu, mu_cpu, ct_copy
 
@@ -89,6 +104,8 @@ def hook_forward_layer(layer, device):
 def clean():
     gc.collect()
     torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 # input: w1 = w3
 def find_linear_layers(module):
@@ -171,6 +188,8 @@ def main(args):
             _dev_emb = model.embed(_tokens)
             _dev_emb = _dev_emb.unsqueeze(0)
             dev_emb.append(_dev_emb.to("cpu"))
+            del _tokens
+            torch.cuda.empty_cache()
         except Exception as e:
             print(f'Rank {rank}: Error processing sample {idx}: {str(e)}')
             raise
@@ -181,9 +200,10 @@ def main(args):
     if rank == 0:
         print(f"dataset dev_emb size: {len(dev_emb)}")
 
-    for transformer_layer_index in range(len(model.layers)):
+    num_layers = len(model.layers)
+    for transformer_layer_index in range(num_layers):
         if rank == 0:
-            print(f'processing layer {transformer_layer_index} / {len(model.layers)}')
+            print(f'processing layer {transformer_layer_index} / {num_layers}')
         transformer_layer = model.layers[transformer_layer_index]
         
         transformer_layer = transformer_layer.to(f'cuda:{rank}')
@@ -206,6 +226,10 @@ def main(args):
             torch.cuda.synchronize()
 
             dev_emb[idx] = _dev_emb.to("cpu")
+            _dev_emb = None
+            _freqs_cis = None
+            _mask = None
+            
             del _dev_emb
             del _freqs_cis
             del _mask
@@ -218,23 +242,31 @@ def main(args):
         for name, done in hook_list:
             H, mu, ct = done()
             save_path = f'{args.save_path}/H_{transformer_layer_index}_{name}.pt'
-            # Save data to disk
             print(f'{rank}: {transformer_layer_index}_{name}, H: {H.shape}, mu: {mu.shape}, ct: {ct}')
+            
+            flatH = sym_to_flat(H.to(torch.float32))
             torch.save({
-                'flatH': sym_to_flat(H.to(torch.float32)),
+                'flatH': flatH,
                 'mu': mu.to(torch.float32),
                 'n': H.shape[0],
                 'ct': ct
             }, save_path)
+           
+            flatH = None
+            H = None
+            mu = None
+            del flatH
             del H
             del mu
             clean()
         
-        transformer_layer.cpu()  # Move layer back to CPU before deletion
+        transformer_layer = None
+        hook_list = None
+        model.layers[transformer_layer_index] = None
         del transformer_layer
         del hook_list
+        # del model.layers[transformer_layer_index]
         clean()
-        torch.cuda.empty_cache()  # Force CUDA memory cleanup
 
     if world_size > 1:
         dist.destroy_process_group()
