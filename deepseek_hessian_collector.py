@@ -18,7 +18,7 @@ from safetensors.torch import load_model
 
 import torch.distributed as dist
 
-from inference.model import Transformer, ModelArgs, ColumnParallelLinear, RowParallelLinear, Linear
+from deepseek.model import Transformer, ModelArgs, ColumnParallelLinear, RowParallelLinear, Linear
 
 from cli_datasets import sample_rp1t
 
@@ -41,7 +41,7 @@ parser.add_argument('--ctx_size', default=4096, type=int)
 parser.add_argument('--tokenizer_path', default=None, type=str)
 parser.add_argument('--dry_run', action='store_true')
 parser.add_argument('--config', default='config.json', type=str)
-
+parser.add_argument('--row_only', action='store_true')
 
 def register_H_hook(module, device):
     n = module.in_features
@@ -94,7 +94,7 @@ def sym_to_flat(A):
 def hook_forward_layer(layer, device):
     torch.set_grad_enabled(False)
      
-    linear_layers = find_linear_layers(layer)
+    linear_layers = find_linear_layers(layer, args.row_only)
     hook_list = []
     
     for name, module in linear_layers:
@@ -108,13 +108,17 @@ def clean():
         torch.cuda.empty_cache()
 
 # input: w1 = w3
-def find_linear_layers(module):
+def find_linear_layers(module, row_only):
     linear_layers = []
-    for name, module in module.named_modules():
-        if isinstance(module, Linear) \
-            or isinstance(module, RowParallelLinear) \
-            or isinstance(module, ColumnParallelLinear):
-            if 'w3' not in name:
+    if row_only:
+        for name, module in module.named_modules():
+            if isinstance(module, RowParallelLinear):
+                linear_layers.append((name, module))
+    else:
+        for name, module in module.named_modules():
+            if isinstance(module, Linear) \
+                or isinstance(module, RowParallelLinear) \
+                or isinstance(module, ColumnParallelLinear):
                 linear_layers.append((name, module))
     return linear_layers
 
