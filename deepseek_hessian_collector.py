@@ -112,8 +112,11 @@ def find_linear_layers(module, row_only):
     linear_layers = []
     if row_only:
         for name, module in module.named_modules():
-            if isinstance(module, RowParallelLinear):
-                linear_layers.append((name, module))
+            if isinstance(module, Linear) \
+                or isinstance(module, RowParallelLinear) \
+                or isinstance(module, ColumnParallelLinear):
+                if ('wo' in name) or (('w2' in name) and ('experts' not in name)):
+                    linear_layers.append((name, module))
     else:
         for name, module in module.named_modules():
             if isinstance(module, Linear) \
@@ -245,7 +248,7 @@ def main(args):
         # save hessian
         for name, done in hook_list:
             H, mu, ct = done()
-            save_path = f'{args.save_path}/H_{transformer_layer_index}_{name}.pt'
+            save_path = f'{args.save_path}/{transformer_layer_index}_{name}.pt'
             print(f'{rank}: {transformer_layer_index}_{name}, H: {H.shape}, mu: {mu.shape}, ct: {ct}')
             
             flatH = sym_to_flat(H.to(torch.float32))
