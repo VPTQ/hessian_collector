@@ -3,7 +3,7 @@
 CKPT_PATH=/home/aiscuser/Deepseek-R1-mp2-share-expert
 CONFIG_PATH=/home/aiscuser/yangwang/DeepSeek-V3/configs/config_671B.json
 
-for seed in {0..19}
+for seed in {2..10}
 do
     echo "Starting run with seed ${seed}"
     

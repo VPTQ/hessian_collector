@@ -115,7 +115,9 @@ def find_linear_layers(module, row_only):
             if isinstance(module, Linear) \
                 or isinstance(module, RowParallelLinear) \
                 or isinstance(module, ColumnParallelLinear):
-                if ('wo' in name) or (('w2' in name) and ('experts' not in name)):
+                if ('wo' in name) \
+                    or (('w2' in name) and ('experts' not in name) \
+                        or ('w2' in name) and ('shared_experts' in name)):
                     linear_layers.append((name, module))
     else:
         for name, module in module.named_modules():
