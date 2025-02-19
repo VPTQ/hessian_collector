@@ -120,7 +120,6 @@ def find_linear_layers(module, row_only):
     else:
         for name, module in module.named_modules():
             if isinstance(module, Linear) \
-                or isinstance(module, RowParallelLinear) \
                 or isinstance(module, ColumnParallelLinear):
                 linear_layers.append((name, module))
     return linear_layers
