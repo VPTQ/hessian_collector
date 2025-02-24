@@ -34,7 +34,7 @@ def load_hessian(hessian_path, logger=None):
     n = H_data['n']
     H, mu = basic_preprocess(H, mu, n)
 
-    return H, mu
+    return H, mu, n
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -44,6 +44,8 @@ if __name__ == "__main__":
                         help='Directory to save inverted Hessian .pt files')
     parser.add_argument('--enable_perm', action='store_true',
                         help='Enable permutation of Hessian')
+    parser.add_argument('--sym', action='store_true',
+                        help='Save symmetric Hessian')
     args = parser.parse_args()
 
     # create folder
@@ -55,7 +57,7 @@ if __name__ == "__main__":
 
     for hessian_file in hessian_files:
         hessian_path = os.path.join(args.load_hessian_dir, hessian_file)
-        hessian, mu = load_hessian(hessian_path)
+        hessian, mu, n = load_hessian(hessian_path)
         dev = 'cuda'
         hessian = hessian.to(dev)
 
@@ -82,9 +84,21 @@ if __name__ == "__main__":
         save_path = os.path.join(args.store_inv_hessian_dir, hessian_file)
         if args.enable_perm is False:
             perm = torch.arange(inv_hessian.shape[0])
-            
-        torch.save({'invH': inv_hessian.to('cpu'),
-                        'perm': perm.to('cpu'),
-                        'zero_idx': zero_idx.to('cpu')}, save_path)
+        
+        def sym_to_flat(A):
+            N = A.shape[-1]
+            idxs = torch.tril_indices(N, N, device=A.device)
+            return A[idxs.unbind()]
+        
+        if args.sym:
+            flat_inv_hessian = sym_to_flat(inv_hessian)
+            torch.save({'invH': flat_inv_hessian.to('cpu'),
+                            'perm': perm.to('cpu'),
+                            'zero_idx': zero_idx.to('cpu'),
+                            'n': n}, save_path)
+        else:
+            torch.save({'invH': inv_hessian.to('cpu'),
+                            'perm': perm.to('cpu'),
+                            'zero_idx': zero_idx.to('cpu')}, save_path)
         
         print(f'Saved inverted Hessian to {save_path}')

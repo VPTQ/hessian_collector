@@ -3,11 +3,11 @@
 CKPT_PATH=/home/aiscuser/Deepseek-R1-mp2-share-expert
 CONFIG_PATH=/home/aiscuser/yangwang/DeepSeek-V3/configs/config_671B.json
 
-for seed in {2..10}
+for seed in {11..20}
 do
     echo "Starting run with seed ${seed}"
     
-    torchrun --nnodes 1 --nproc-per-node 2 deepseek_hessian_collector.py \
+    CUDA_VISIBLE_DEVICES=2,3 torchrun --nnodes 1 --nproc-per-node 2 deepseek_hessian_collector.py \
         --ckpt_path ${CKPT_PATH} \
         --config ${CONFIG_PATH} \
         --save_path Hessians-Deepseek-R1-6144-512-seed-${seed} \
